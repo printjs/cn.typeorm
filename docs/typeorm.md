@@ -812,10 +812,272 @@ createConnection(/*...*/).then(async connection => {
 }).catch(error => console.log(error));
 ```
 
-`QueryBuilder`允许 allows creation and execution of SQL queries of almost any complexity
+`QueryBuilder`允许创建并且执行几乎任何复杂的SQL查询。当你和`QueryBuilder`一起工作，想想你创建一个SQL查询。在这个例子，photo和metadata是别名应用在选择photos中。你使用别名访问列和选择数据的属性。
+
+# 使用级联自动保存相关对象
+我们设置级联选项在我们的关系。在这个例子，当你希望我们的关系对象在其他对象被保存时能被保存。一起改变一点我们的`@OneToOne`装饰器
+
+```javascript
+export class Photo {
+    /// ... other columns
+
+    @OneToOne(type => PhotoMetadata, metadata => metadata.photo, {
+        cascade: true,
+    })
+    metadata: PhotoMetadata;
+}
+```
+
+使用`cascade`允许我们不单独保存photo和单独保存metadata对象。现在，我们可以简单的保存photo对象，并且这个metadata对象因为级联选项也将会自动保存。
+
+```javascript
+createConnection(options).then(async connection => {
+
+    // create photo object
+    let photo = new Photo();
+    photo.name = "Me and Bears";
+    photo.description = "I am near polar bears";
+    photo.filename = "photo-with-bears.jpg";
+    photo.isPublished = true;
+
+    // create photo metadata object
+    let metadata = new PhotoMetadata();
+    metadata.height = 640;
+    metadata.width = 480;
+    metadata.compressed = true;
+    metadata.comment = "cybershoot";
+    metadata.orientation = "portait";
+
+    photo.metadata = metadata; // this way we connect them
+
+    // get repository
+    let photoRepository = connection.getRepository(Photo);
+
+    // saving a photo also save the metadata
+    await photoRepository.save(photo);
+
+    console.log("Photo is saved, photo metadata is saved too.")
+
+}).catch(error => console.log(error));
+```
+
+# 创建多对一/一对多关系
+
+一起创建多对一/一对多关系。假设一个照片有一个作者，每个作者有很多照片。首先，一起创建`Author`类
+
+```javascript
+import {Entity, Column, PrimaryGeneratedColumn, OneToMany, JoinColumn} from "typeorm";
+import {Photo} from "./Photo";
+
+@Entity()
+export class Author {
+
+    @PrimaryGeneratedColumn()
+    id: number;
+
+    @Column()
+    name: string;
+
+    @OneToMany(type => Photo, photo => photo.author) // note: we will create author property in the Photo class below
+    photos: Photo[];
+}
+```
+
+`Author`包含关系的反面。`OneToMany`总是关系的反面，没有`ManyToOne`在关系的另一面，它就不能存在。
+
+现在一起增加自己的关系面在photo实体
+
+```javascript
+import {Entity, Column, PrimaryGeneratedColumn, ManyToOne} from "typeorm";
+import {PhotoMetadata} from "./PhotoMetadata";
+import {Author} from "./Author";
+
+@Entity()
+export class Photo {
+
+    /* ... other columns */
+
+    @ManyToOne(type => Author, author => author.photos)
+    author: Author;
+}
+```
+
+在 many-to-one / one-to-many 关系中，拥有者的面总是many-to-one。它意味着使用`@ManyToOne`将会存储关系对象的id的类。
+
+在你运行应用之后，ORM将会创建`author`表
+```
++-------------+--------------+----------------------------+
+|                          author                         |
++-------------+--------------+----------------------------+
+| id          | int(11)      | PRIMARY KEY AUTO_INCREMENT |
+| name        | varchar(255) |                            |
++-------------+--------------+----------------------------+
+```
+
+它也将修改`photo`表，增加`author`列并且创建一个外键给这个列
+```
++-------------+--------------+----------------------------+
+|                         photo                           |
++-------------+--------------+----------------------------+
+| id          | int(11)      | PRIMARY KEY AUTO_INCREMENT |
+| name        | varchar(255) |                            |
+| description | varchar(255) |                            |
+| filename    | varchar(255) |                            |
+| isPublished | boolean      |                            |
+| authorId    | int(11)      | FOREIGN KEY                |
++-------------+--------------+----------------------------+
+```
+
+# 创建多对多关系
+一起创建many-to-one / many-to-many 关系。假设一个photo在很多专辑中。并且每一个专辑包含很多照片。一起创建`Album`类
+
+```javascript
+import {Entity, PrimaryGeneratedColumn, Column, ManyToMany, JoinTable} from "typeorm";
+
+@Entity()
+export class Album {
+
+    @PrimaryGeneratedColumn()
+    id: number;
+
+    @Column()
+    name: string;
+
+    @ManyToMany(type => Photo, photo => photo.albums)
+    @JoinTable()
+    photos: Photo[];
+}
+```
+
+`@JoinTable`是必须的去指定这个拥有者的关系面。
+
+现在，一起增加我们关系的反面给photo类
+
+```javascript
+export class Photo {
+    /// ... other columns
+
+    @ManyToMany(type => Album, album => album.photos)
+    albums: Album[];
+}
+```
+
+在你运行完应用后，ORM将会创建`album_photos_photo_albums`连接点表
+```
++-------------+--------------+----------------------------+
+|                album_photos_photo_albums                |
++-------------+--------------+----------------------------+
+| album_id    | int(11)      | PRIMARY KEY FOREIGN KEY    |
+| photo_id    | int(11)      | PRIMARY KEY FOREIGN KEY    |
++-------------+--------------+----------------------------+
+```
+
+不要忘记注册`Album`类和你的连接在ORM
+
+```javascript
+const options: ConnectionOptions = {
+    // ... other options
+    entities: [Photo, PhotoMetadata, Author, Album]
+};
+```
+
+现在，一起插入ablums和photos 给我们的数据库
+```javascript
+let connection = await createConnection(options);
+
+// create a few albums
+let album1 = new Album();
+album1.name = "Bears";
+await connection.manager.save(album1);
+
+let album2 = new Album();
+album2.name = "Me";
+await connection.manager.save(album2);
+
+// create a few photos
+let photo = new Photo();
+photo.name = "Me and Bears";
+photo.description = "I am near polar bears";
+photo.filename = "photo-with-bears.jpg";
+photo.albums = [album1, album2];
+await connection.manager.save(photo);
+
+// now our photo is saved and albums are attached to it
+// now lets load them:
+const loadedPhoto = await connection
+    .getRepository(Photo)
+    .findOne(1, { relations: ["albums"] });
+```
+
+`loadedPhoto`将会等价于
+
+```json
+{
+    id: 1,
+    name: "Me and Bears",
+    description: "I am near polar bears",
+    filename: "photo-with-bears.jpg",
+    albums: [{
+        id: 1,
+        name: "Bears"
+    }, {
+        id: 2,
+        name: "Me"
+    }]
+}
+```
+
+# 使用QueryBuilder
+
+你可以使用QueryBuilder去构建大部分复杂的SQL查询。举个例子，你看这样做
+```javascript
+let photos = await connection
+    .getRepository(Photo)
+    .createQueryBuilder("photo") // first argument is an alias. Alias is what you are selecting - photos. You must specify it.
+    .innerJoinAndSelect("photo.metadata", "metadata")
+    .leftJoinAndSelect("photo.albums", "album")
+    .where("photo.isPublished = true")
+    .andWhere("(photo.name = :photoName OR photo.name = :bearName)")
+    .orderBy("photo.id", "DESC")
+    .skip(5)
+    .take(10)
+    .setParameters({ photoName: "My", bearName: "Mishka" })
+    .getMany();
+```
+
+这个选择查询所有名字为"My"或者"Mishaka"的发布的照片。它将会选择结果从位置5（分页偏移），并且将选择只有10个结果（分页限制）。这个选择结果将会通过id降序排列。这个photo的albums将会左连接并且他们的metadata将会内连接。
+
+你将使用查询构建起在你的应用中。学习更多关于QueryBuilder在[这里](http://typeorm.io/#/select-query-builder/)
+
+# 例子
+
+查看样本中的样本以查看使用[示例](https://github.com/typeorm/typeorm/tree/master/sample)。
+
+这里有一些你可以克隆并且开始使用库
+
+* [Example how to use TypeORM with TypeScript](https://github.com/typeorm/typescript-example)
+* [Example how to use TypeORM with JavaScript](https://github.com/typeorm/javascript-example)
+* [Example how to use TypeORM with JavaScript and Babel](https://github.com/typeorm/babel-example)
+* [Example how to use TypeORM with TypeScript and SystemJS in Browser](https://github.com/typeorm/browser-example)
+* [Example how to use Express and TypeORM](https://github.com/typeorm/typescript-express-example)
+* [Example how to use Koa and TypeORM](https://github.com/typeorm/typescript-koa-example)
+* [Example how to use TypeORM with MongoDB](https://github.com/typeorm/mongo-typescript-example)
+* [Example how to use TypeORM in a Cordova/PhoneGap app](https://github.com/typeorm/cordova-example)
+* [Example how to use TypeORM with an Ionic app](https://github.com/typeorm/ionic-example)
+* [Example how to use TypeORM with React Native](https://github.com/typeorm/react-native-example)
+* [Example how to use TypeORM with Electron using JavaScript](https://github.com/typeorm/electron-javascript-example)
+* [Example how to use TypeORM with Electron using TypeScript](https://github.com/typeorm/electron-typescript-example)
+
+# 扩展
+
+这有一些扩展，它可以简单和TypeORM一起工作并且集成其他的模块。
+
+* [TypeORM + GraphQL framework](http://vesper-framework.com)
+* [TypeORM integration](https://github.com/typeorm/typeorm-typedi-extensions) with [TypeDI](https://github.com/typestack/typedi)
+* [TypeORM integration](https://github.com/typeorm/typeorm-routing-controllers-extensions) with [routing-controllers](https://github.com/typestack/routing-controllers)
+Models generation from existing database - [typeorm-model-generator](https://github.com/Kononnable/typeorm-model-generator)
 
 
-
-
-
+# 原文地址
+[地址](http://typeorm.io/#/)
 
